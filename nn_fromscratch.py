@@ -135,8 +135,6 @@ class SWDataset(Dataset):
                 signal_idx   = len(self.signals) - 1
                 total_points = data_selected.shape[1]
 
-                # --- THE CROSS-SENSOR LABELING FIX ---
-                # Strip "_pulse" from the neck filenames so they perfectly match the mask CSV keys
                 lookup_key = file_name.replace("_pulse", "")
                 apnea_info = self.apnea_labels.get(lookup_key, None)
 
@@ -285,7 +283,7 @@ def main():
     LABELS_CSV  = "mask_apnea_labels.csv" 
     
     SENSOR_TYPE = 'mask'   # Change this to 'neck' and it will now successfully grab the mask labels!
-
+    
     SAMPLING_POINTS = 2500  # 10 seconds of data per window at 250 Hz
     TRAIN_OFFSET    = 250   # Slide window by 1 second
     VAL_OFFSET      = 250
