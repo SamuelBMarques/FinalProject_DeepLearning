@@ -283,8 +283,8 @@ def main():
     LABELS_CSV  = "mask_apnea_labels.csv" 
     
     SENSOR_TYPE = 'mask'   # Change this to 'neck' and it will now successfully grab the mask labels!
-    
-    SAMPLING_POINTS = 2500  # 10 seconds of data per window at 250 Hz
+
+    SAMPLING_POINTS = 7500  # 30 seconds of data per window at 250 Hz
     TRAIN_OFFSET    = 250   # Slide window by 1 second
     VAL_OFFSET      = 250
     TEST_OFFSET     = 2500  # No overlap for testing
