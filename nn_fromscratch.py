@@ -8,6 +8,7 @@ from torch.utils.data import Dataset, DataLoader
 from scipy.interpolate import interp1d
 from scipy.signal import butter, filtfilt
 from sklearn.utils.class_weight import compute_class_weight
+from sklearn.metrics import confusion_matrix, classification_report
 
 # ─────────────────────────────────────────────────────────────────────────────
 # DICTIONARIES
@@ -54,7 +55,7 @@ class SWDataset(Dataset):
     provided by an external CSV file.
     """
     def __init__(self, base_folder, labels_csv, sampling_points, offset,
-                 tasks, subjects, sensor_type='mask'):
+                 tasks, subjects, sensor_type='mask', classification_mode='multiclass'):
 
         self.signals = []
         self.window_indices = []
@@ -149,18 +150,23 @@ class SWDataset(Dataset):
                         a_start = apnea_info['start']
                         a_end = apnea_info['end']
                         
-                        # Calculate time overlap between window and apnea event
+                        # Calculates the overlap between the window and the apnea event
                         overlap_start = max(w_start_t, a_start)
                         overlap_end = min(w_end_t, a_end)
                         overlap_duration = max(0, overlap_end - overlap_start)
-                        window_duration = w_end_t - w_start_t
                         
-                        # If >= 50% of the window contains the apnea event, assign the label
-                        if (overlap_duration / window_duration) >= 0.5:
-                            if '10' in str(apnea_info['type']):
+                        # Calculates the total duration of the apnea event
+                        apnea_duration = a_end - a_start
+                        
+                        # If the window captured at least 60% of the entire apnea event, assign the class
+                        if apnea_duration > 0 and (overlap_duration / apnea_duration) >= 0.6:
+                            if classification_mode == 'binary':
                                 label = 1
-                            elif '20' in str(apnea_info['type']):
-                                label = 2
+                            else:
+                                if '10' in str(apnea_info['type']):
+                                    label = 1
+                                elif '20' in str(apnea_info['type']):
+                                    label = 2
 
                     self.window_indices.append((signal_idx, start_idx, label))
 
@@ -184,40 +190,42 @@ class SWDataset(Dataset):
 # MODEL ARCHITECTURE
 # ─────────────────────────────────────────────────────────────────────────────
 
-class ConvBlock(nn.Module):
-    def __init__(self, in_channels, out_channels, kernel_size, pool_size=2):
-        super().__init__()
-        self.block = nn.Sequential(
-            nn.Conv1d(in_channels, out_channels, kernel_size=kernel_size, padding=kernel_size // 2),
-            nn.BatchNorm1d(out_channels),
-            nn.ReLU(),
-            nn.MaxPool1d(pool_size),
-        )
-
-    def forward(self, x):
-        return self.block(x)
-
-
 class CNN1D(nn.Module):
-    def __init__(self, in_channels, num_classes=3):
+    def __init__(self, in_channels, classification_mode='multiclass'):
         super().__init__()
+        
+        if classification_mode == 'binary':
+            self.num_classes = 2
+        elif classification_mode == 'multiclass':
+            self.num_classes = 3
+        else:
+            raise ValueError("classification_mode must be 'binary' or 'multiclass'")
+
         self.features = nn.Sequential(
-            ConvBlock(in_channels, 16, kernel_size=11),
-            ConvBlock(16,          32, kernel_size=7), 
-        )
-        self.global_pool = nn.AdaptiveAvgPool1d(8)
-        self.classifier = nn.Sequential(
-            nn.Flatten(),                          
-            nn.Linear(32 * 8, 64),
+            nn.Conv1d(in_channels=in_channels, out_channels=32, kernel_size=5, padding=2),
             nn.ReLU(),
-            nn.Dropout(0.4),
-            nn.Linear(64, num_classes),
+            nn.MaxPool1d(kernel_size=2),
+
+            nn.Conv1d(in_channels=32, out_channels=16, kernel_size=5, padding=2),
+            nn.ReLU(),
+            nn.MaxPool1d(kernel_size=2)
+        )
+
+        self.global_pool = nn.AdaptiveAvgPool1d(16) 
+
+        self.classifier = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(16 * 16, 64), 
+            nn.ReLU(),
+            nn.Dropout(0.5),
+            nn.Linear(64, self.num_classes)
         )
 
     def forward(self, x):
         x = self.features(x)
         x = self.global_pool(x)
-        return self.classifier(x)
+        out = self.classifier(x)
+        return out
 
 # ─────────────────────────────────────────────────────────────────────────────
 # TRAINING LOOPS
@@ -259,21 +267,42 @@ def evaluate(model, loader, criterion, device):
     if total == 0: return 0, 0
     return total_loss / total, correct / total
 
-def test(model, loader, device):
+def test(model, loader, device, classification_mode):
     model.eval()
     correct, total = 0, 0
+    all_preds = []
+    all_labels = []
+    
     with torch.no_grad():
         for X, y in loader:
             X, y   = X.to(device), y.to(device)
             preds  = model(X).argmax(1)
+            
             correct += (preds == y).sum().item()
             total   += X.size(0)
+            
+            all_preds.extend(preds.cpu().numpy())
+            all_labels.extend(y.cpu().numpy())
 
     if total == 0: return 0
     acc = correct / total
-    print(f"\n[TEST] Final Accuracy: {acc:.4f}  ({correct}/{total})\n")
+    
+    print(f"\n[TEST] Final Accuracy: {acc:.4f}  ({correct}/{total})")
+    print("─" * 60)
+    print("CONFUSION MATRIX")
+    print(confusion_matrix(all_labels, all_preds))
+    print("─" * 60)
+    
+    if classification_mode == 'binary':
+        target_names = ['Normal', 'Apnea']
+    else:
+        target_names = ['Normal', 'Apnea 10s', 'Apnea 20s']
+        
+    print("CLASSIFICATION REPORT")
+    print(classification_report(all_labels, all_preds, target_names=target_names, zero_division=0))
+    print("─" * 60 + "\n")
+    
     return acc
-
 # ─────────────────────────────────────────────────────────────────────────────
 # MAIN
 # ─────────────────────────────────────────────────────────────────────────────
@@ -282,7 +311,8 @@ def main():
     BASE_FOLDER = "physionet.org/files/respiratory-oximetry-apnoea/1.0.0"
     LABELS_CSV  = "mask_apnea_labels.csv" 
     
-    SENSOR_TYPE = 'mask'   # Change this to 'neck' and it will now successfully grab the mask labels!
+    SENSOR_TYPE         = 'mask'         # 'mask' or 'neck'
+    CLASSIFICATION_MODE = 'multiclass'   # 'binary' or 'multiclass'
 
     SAMPLING_POINTS = 7500  # 30 seconds of data per window at 250 Hz
     TRAIN_OFFSET    = 250   # Slide window by 1 second
@@ -297,17 +327,17 @@ def main():
     TEST_SUBJECTS  = list(range(18, 21))   
 
     BATCH_SIZE  = 16 
-    NUM_EPOCHS  = 20         
+    NUM_EPOCHS  = 10         
     LR          = 1e-3
     
-    CHECKPOINT = f"best_model_{SENSOR_TYPE}.pt"
+    CHECKPOINT = f"best_model_{SENSOR_TYPE}_{CLASSIFICATION_MODE}.pt"
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Device: {device} | Sensor: {SENSOR_TYPE.upper()}\n")
+    print(f"Device: {device} | Sensor: {SENSOR_TYPE.upper()} | Mode: {CLASSIFICATION_MODE.upper()}\n")
 
     print("Loading datasets and generating localized windows...")
-    train_ds = SWDataset(BASE_FOLDER, LABELS_CSV, SAMPLING_POINTS, TRAIN_OFFSET, TASKS, TRAIN_SUBJECTS, SENSOR_TYPE)
-    val_ds   = SWDataset(BASE_FOLDER, LABELS_CSV, SAMPLING_POINTS, VAL_OFFSET, TASKS, VAL_SUBJECTS, SENSOR_TYPE)
-    test_ds  = SWDataset(BASE_FOLDER, LABELS_CSV, SAMPLING_POINTS, TEST_OFFSET, TASKS, TEST_SUBJECTS, SENSOR_TYPE)
+    train_ds = SWDataset(BASE_FOLDER, LABELS_CSV, SAMPLING_POINTS, TRAIN_OFFSET, TASKS, TRAIN_SUBJECTS, SENSOR_TYPE, CLASSIFICATION_MODE)
+    val_ds   = SWDataset(BASE_FOLDER, LABELS_CSV, SAMPLING_POINTS, VAL_OFFSET, TASKS, VAL_SUBJECTS, SENSOR_TYPE, CLASSIFICATION_MODE)
+    test_ds  = SWDataset(BASE_FOLDER, LABELS_CSV, SAMPLING_POINTS, TEST_OFFSET, TASKS, TEST_SUBJECTS, SENSOR_TYPE, CLASSIFICATION_MODE)
 
     train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True)
     val_loader   = DataLoader(val_ds,   batch_size=BATCH_SIZE, shuffle=False)
@@ -318,19 +348,20 @@ def main():
     # ─────────────────────────────────────────────────────────────────────────
     y_train = [label for _, _, label in train_ds.window_indices]
     classes = np.unique(y_train)
+    expected_classes = 2 if CLASSIFICATION_MODE == 'binary' else 3
     
-    if len(classes) < 3:
+    if len(classes) < expected_classes:
         print(f"\n[WARNING] Only found classes {classes} in training data.")
         print("Defaulting to unweighted loss (1.0 for all) to prevent crash.")
-        class_weights = torch.tensor([1.0, 1.0, 1.0], dtype=torch.float32).to(device)
+        class_weights = torch.tensor([1.0] * expected_classes, dtype=torch.float32).to(device)
     else:
         weights = compute_class_weight(class_weight='balanced', classes=classes, y=y_train)
         class_weights = torch.tensor(weights, dtype=torch.float32).to(device)
         print(f"Computed Class Weights: {weights}")
 
-    model = CNN1D(in_channels=INPUT_CHANNELS, num_classes=3).to(device)
+    model = CNN1D(in_channels=INPUT_CHANNELS, classification_mode=CLASSIFICATION_MODE).to(device)
     criterion = nn.CrossEntropyLoss(weight=class_weights)
-    optimizer = optim.Adam(model.parameters(), lr=LR, weight_decay=1e-3)
+    optimizer = optim.Adam(model.parameters(), lr=LR, weight_decay=1e-2)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', patience=5, factor=0.5)
 
     best_val_loss = float('inf')
@@ -357,7 +388,7 @@ def main():
 
     print(f"\nLoading best checkpoint '{CHECKPOINT}'...")
     model.load_state_dict(torch.load(CHECKPOINT, map_location=device))
-    test(model, test_loader, device)
+    test(model, test_loader, device, CLASSIFICATION_MODE)
 
 if __name__ == "__main__":
     main()
