@@ -1,0 +1,5 @@
+First, you run resp_oximetry_classical_baseline.py by typing in the terminal:
+python resp_oximetry_classical_baseline.py --inline-zip Inline_PQ_Data.zip --pulse-zip Neck_Pulse_Oximeter_Data.zip --out-dir resp_oximetry_baseline_results --n-estimators 100
+
+For results, after that, type this in the terminal:
+python visualize_baseline_results_with_values.py 
